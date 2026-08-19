@@ -5,7 +5,6 @@ CREATE TABLE IF NOT EXISTS watch_keywords (
   phrase TEXT NOT NULL UNIQUE,
   scope TEXT NOT NULL DEFAULT 'AI 大模型、AI 编程、开源模型、科技公司动态',
   enabled INTEGER NOT NULL DEFAULT 1,
-  notify_threshold INTEGER NOT NULL DEFAULT 70,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

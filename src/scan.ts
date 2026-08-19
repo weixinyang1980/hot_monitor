@@ -20,7 +20,7 @@ export async function runScan(io: Server, trigger: 'manual' | 'scheduled' = 'sch
       db.prepare('DELETE FROM stories').run()
     })
     clearStories()
-    const keywords = db.prepare('SELECT id, phrase, notify_threshold as notifyThreshold FROM watch_keywords WHERE enabled = 1').all() as Array<{ id: number; phrase: string; notifyThreshold: number }>
+    const keywords = db.prepare('SELECT id, phrase FROM watch_keywords WHERE enabled = 1').all() as Array<{ id: number; phrase: string }>
     const rawStories = await collectStories(keywords.map((keyword) => keyword.phrase))
     let inserted = 0
     for (const story of rawStories) {
@@ -36,7 +36,7 @@ export async function runScan(io: Server, trigger: 'manual' | 'scheduled' = 'sch
         try { verdict = await evaluateStory(story, keyword.phrase) } catch (error) { verdict = { relevant: false, technical: false, contentType: 'other' as const, relevanceScore: 0, credibilityScore: 0, classification: 'unverified' as const, summary: story.content.slice(0, 300), keyFacts: [], reasoning: `AI 判定失败，已过滤：${error instanceof Error ? error.message : '未知错误'}` } }
         if (!verdict.relevant || !verdict.technical || verdict.contentType === 'other') continue
         db.prepare('INSERT OR IGNORE INTO story_matches (story_id, keyword_id, relevance_score, credibility_score, classification, summary, key_facts_json, reasoning, evaluated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(storyId, keyword.id, verdict.relevanceScore, verdict.credibilityScore, verdict.classification, verdict.summary, JSON.stringify(verdict.keyFacts), verdict.reasoning, now())
-        await notifyNewStory(io, story, verdict, keyword.phrase, keyword.notifyThreshold).catch(() => false)
+        notifyNewStory(io, story, verdict, keyword.phrase)
         inserted += 1
       }
     }

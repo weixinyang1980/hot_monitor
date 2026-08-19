@@ -20,7 +20,6 @@ app.use(express.json())
 const keywordSchema = z.object({
   phrase: z.string().trim().min(1).max(120),
   scope: z.string().trim().min(1).max(240).default('AI 大模型、AI 编程、开源模型、科技公司动态'),
-  notifyThreshold: z.number().int().min(0).max(100).default(70),
 })
 
 app.get('/api/health', (_request, response) => {
@@ -38,7 +37,7 @@ app.get('/api/health', (_request, response) => {
 })
 
 app.get('/api/keywords', (_request, response) => {
-  const rows = db.prepare('SELECT id, phrase, scope, enabled, notify_threshold as notifyThreshold, updated_at as updatedAt FROM watch_keywords ORDER BY updated_at DESC').all()
+  const rows = db.prepare('SELECT id, phrase, scope, enabled, updated_at as updatedAt FROM watch_keywords ORDER BY updated_at DESC').all()
   response.json(rows)
 })
 
@@ -51,8 +50,8 @@ app.post('/api/keywords', (request, response) => {
 
   const timestamp = now()
   try {
-    const result = db.prepare('INSERT INTO watch_keywords (phrase, scope, notify_threshold, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(parsed.data.phrase, parsed.data.scope, parsed.data.notifyThreshold, timestamp, timestamp)
-    const keyword = db.prepare('SELECT id, phrase, scope, enabled, notify_threshold as notifyThreshold, updated_at as updatedAt FROM watch_keywords WHERE id = ?').get(result.lastInsertRowid)
+    const result = db.prepare('INSERT INTO watch_keywords (phrase, scope, created_at, updated_at) VALUES (?, ?, ?, ?)').run(parsed.data.phrase, parsed.data.scope, timestamp, timestamp)
+    const keyword = db.prepare('SELECT id, phrase, scope, enabled, updated_at as updatedAt FROM watch_keywords WHERE id = ?').get(result.lastInsertRowid)
     response.status(201).json(keyword)
   } catch {
     response.status(409).json({ error: '这个关键词已经存在' })
