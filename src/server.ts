@@ -29,7 +29,7 @@ app.get('/api/health', (_request, response) => {
     scanIntervalMinutes: 30,
     nextScheduledAt: getNextHalfHour().toISOString(),
     sources: {
-      web: 'READY',
+      web: process.env.FIRECRAWL_API_KEY ? 'READY' : 'CONFIG',
       rss: 'READY',
       twitter: process.env.TWITTERAPI_API_KEY ? 'READY' : 'CONFIG',
     },
@@ -88,6 +88,7 @@ app.get('/api/stories', (_request, response) => {
     FROM story_matches sm
     JOIN stories s ON s.id = sm.story_id
     JOIN watch_keywords wk ON wk.id = sm.keyword_id
+    WHERE wk.enabled = 1
     ORDER BY sm.evaluated_at DESC
     LIMIT 100
   `).all()

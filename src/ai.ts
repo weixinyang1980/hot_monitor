@@ -23,6 +23,7 @@ const verdictSchema = z.object({
   technical: z.boolean(),
   contentType: contentTypeSchema,
   relevanceScore: z.number().min(0).max(100).transform((value) => Math.round(value)),
+  keywordFocusScore: z.number().min(0).max(100).transform((value) => Math.round(value)),
   credibilityScore: z.number().min(0).max(100).transform((value) => Math.round(value)),
   classification: classificationSchema,
   summary: z.string().min(1).max(500),
@@ -38,7 +39,20 @@ export async function evaluateStory(story: RawStory, phrase: string): Promise<Ve
   const key = process.env.DEEPSEEK_API_KEY
   if (!key) {
     const technical = technicalSignals.test(`${story.title} ${story.content}`)
-    return { relevant: technical, technical, contentType: technical ? 'technical_blog' : 'other', relevanceScore: technical ? 45 : 0, credibilityScore: 0, classification: 'unverified', summary: story.content.slice(0, 300), keyFacts: [], reasoning: technical ? '未配置 DeepSeek，使用本地技术内容规则通过。' : '未检测到技术内容特征，已过滤。' }
+    const directMatch = `${story.title} ${story.content}`.toLocaleLowerCase().includes(phrase.trim().toLocaleLowerCase())
+    const relevant = technical && directMatch
+    return {
+      relevant,
+      technical,
+      contentType: technical ? 'technical_blog' : 'other',
+      relevanceScore: relevant ? 75 : 0,
+      keywordFocusScore: relevant ? 80 : 0,
+      credibilityScore: story.sourceQuality,
+      classification: story.sourceQuality >= 90 ? 'verified' : 'unverified',
+      summary: story.content.slice(0, 300),
+      keyFacts: [],
+      reasoning: relevant ? '未配置 DeepSeek，仅保留关键词直接出现且来源质量达标的技术内容。' : '未检测到关键词直接相关的技术内容，已过滤。',
+    }
   }
 
   const response = await fetch('https://api.deepseek.com/chat/completions', {
@@ -46,8 +60,8 @@ export async function evaluateStory(story: RawStory, phrase: string): Promise<Ve
     body: JSON.stringify({
       model: process.env.DEEPSEEK_MODEL ?? 'deepseek-chat', stream: false, response_format: { type: 'json_object' }, temperature: 0.1,
       messages: [
-        { role: 'system', content: '你是面向 AI 编程博主的技术热点编辑和事实核验员。只根据给定内容判断，不要把推测写成事实。只有技术博客、技术产品/模型发布、开发者讨论、代码/API/SDK/开源项目、技术研究或基准测试才算 technical=true。普通新闻、娱乐、生活方式、泛营销、招聘、体育、金融和与技术无关的内容必须 technical=false。必须输出 JSON，字段为 relevant、technical、contentType、relevanceScore、credibilityScore、classification、summary、keyFacts、reasoning。relevant 只有在同时满足“与关键词相关”和“technical=true”时才为 true。' },
-        { role: 'user', content: JSON.stringify({ keyword: phrase, source: story.sourceName, title: story.title, url: story.url, publishedAt: story.publishedAt, content: story.content.slice(0, 6000) }) },
+        { role: 'system', content: '你是面向 AI 编程博主的技术热点编辑和事实核验员。只根据给定内容判断，不要把推测写成事实。只有技术博客、技术产品/模型发布、开发者讨论、代码/API/SDK/开源项目、技术研究或基准测试才算 technical=true。普通新闻、娱乐、生活方式、泛营销、招聘、体育、金融和与技术无关的内容必须 technical=false。关键词必须是内容的主要事件、核心技术对象或被实质分析的主题；只是在背景、转述、标签或顺带提及时，keywordFocusScore 必须不高于 30，且 relevant=false。明确产品发布、技术细节、基准、源码或核心分析可给 70 分以上。可信度必须结合给定的来源质量与内容中的可验证事实，未知社交账号的无证据主张不得视为高可信。必须输出 JSON，字段为 relevant、technical、contentType、relevanceScore、keywordFocusScore、credibilityScore、classification、summary、keyFacts、reasoning。relevant 只有在同时满足“关键词是核心主题”“technical=true”时才为 true。' },
+        { role: 'user', content: JSON.stringify({ keyword: phrase, source: story.sourceName, sourceType: story.sourceType, sourceQuality: story.sourceQuality, author: story.author, title: story.title, url: story.url, publishedAt: story.publishedAt, content: story.content.slice(0, 6000) }) },
       ],
     }),
   })

@@ -13,7 +13,7 @@
 
 ## 1. 这个项目是什么
 
-Hot Monitor 是一个给 **AI 编程内容创作者** 用的热点雷达：你添加关键词，系统定时（默认对齐整点/半点，每 30 分钟）从 RSS 和可选的 X/Twitter 抓内容，用 DeepSeek（或本地规则兜底）判断「是否相关、是否技术向、可信度多少」，再通过页面实时推送，高可信时还可以发邮件。
+Hot Monitor 是一个给 **AI 编程内容创作者** 用的热点雷达：你添加关键词，系统定时（默认对齐整点/半点，每 30 分钟）从可信 RSS、可选网页/新闻发现和经过质量门槛的 X/Twitter 抓内容，用 DeepSeek（或本地规则兜底）判断「关键词是否是核心事件、是否技术向、可信度多少」，再按来源配额筛选后实时推送，高可信时还可以发邮件。
 
 它不是搜索引擎，也不是多用户 SaaS。单机 Web 控制台 + 本机 SQLite，密钥只放服务端环境变量。
 
@@ -66,8 +66,10 @@ hot_monitor/
   src/                 后端 TypeScript
     server.ts          组合根：HTTP + Socket.IO + 启动调度
     scan.ts            扫描编排（采集 → 去重 → AI → 入库 → 通知）
-    sources.ts         来源适配器（RSS、Twitter）
-    ai.ts              DeepSeek 判定 + Zod 校验 + 本地兜底
+      sources.ts         来源适配器（RSS、网页/新闻、质量筛选后的 X）
+      source-policy.ts   可信来源、X 作者门槛和分数/配额配置
+      story-selection.ts 入库前的相关性、可信度与来源多样性筛选
+      ai.ts              DeepSeek 判定 + Zod 校验 + 本地兜底
     schedule.ts        对齐 :00 / :30 的定时器
     notifications.ts   Socket.IO 广播 + SMTP 邮件
     types.ts           前端列表用的 Story 形状
@@ -100,20 +102,19 @@ POST /api/scans 或 半点调度
         │  DELETE story_matches + stories     ← 每次全量清空
         ▼
   collectStories(phrases)       src/sources.ts
-        │  RSS × 3 + 每个关键词一次 Twitter
+        │  RSS × 8 + 每个关键词一次网页/新闻发现 + 一次 X
+        │  X 先经过白名单或认证/粉丝/互动门槛；网页只留可信域名
         │  Promise.allSettled：单个来源失败不影响其他
         ▼
-  对每条 RawStory
-        │  sha256(title|content) 去重
-        │  INSERT OR IGNORE stories
+  对每条 RawStory × 每个启用关键词
+        │  evaluateStory：关键词必须是核心事件
         ▼
-  对每个启用关键词
-        │  evaluateStory(story, phrase)        src/ai.ts
-        │  失败则视为 unverified，不入库匹配
-        │  必须 relevant && technical && contentType !== 'other'
+  selectDiverseStories(...)     src/story-selection.ts
+        │  相关性 / 关键词聚焦度 / 可信度达标
+        │  限制 X 的总数、回退数与占比，优先 RSS / Web
         ▼
-  INSERT story_matches
-        │
+  对最终候选
+        │  sha256(title|content) 去重并写入 stories / story_matches
         ▼
   notifyNewStory(...)           src/notifications.ts
         │  一定 io.emit('story:new')
@@ -128,7 +129,7 @@ POST /api/scans 或 半点调度
 **学习时务必抓住两点：**
 
 1. **扫描是全量快照，不是增量历史。** `runScan` 开头会删掉全部 `stories` 和 `story_matches`。按钮文案「清空并重新扫描」就是这个语义。
-2. **AI 失败不能变成高可信热点。** `scan.ts` 捕获 `evaluateStory` 异常后给出 0 分兜底，并且不满足 `relevant/technical` 就不会写入 `story_matches`，因此也不会发高优先级邮件。
+2. **质量筛选在入库前完成。** `scan.ts` 先评估所有候选，再由 `selectDiverseStories` 检查相关性、关键词聚焦度、可信度和 X 来源比例；AI 失败会得到 0 分兜底，因此不会写入 `story_matches` 或发高优先级邮件。
 
 ---
 
@@ -139,7 +140,7 @@ POST /api/scans 或 半点调度
 - Express 与 Socket.IO 共用同一个 `http.Server`。
 - 请求体用 Zod 校验关键词（长度、阈值 0–100）。
 - `NODE_ENV === 'test'` 时不 `listen`、不启动调度，方便 Supertest。
-- 健康检查里的 `sources.web` / `sources.rss` 写死为 `READY`；Twitter 取决于是否配置 `TWITTERAPI_API_KEY`。
+- 健康检查会如实报告来源配置：RSS 始终 `READY`；网页/新闻发现取决于 `FIRECRAWL_API_KEY`；X 取决于是否配置 `TWITTERAPI_API_KEY`。
 
 REST 一览：
 
@@ -150,7 +151,7 @@ REST 一览：
 | PATCH | `/api/keywords/:id` | 启用或暂停 |
 | DELETE | `/api/keywords/:id` | 删除 |
 | GET | `/api/stories` | 最近 100 条匹配结果（JOIN 三表） |
-| PATCH | `/api/stories/:id/read` | 标记已读（前端尚未调用） |
+| PATCH | `/api/stories/:id/read` | 标记已读 |
 | GET | `/api/scans/latest` | 最近一次扫描记录 |
 | POST | `/api/scans` | 202 立即返回，后台 `runScan(..., 'manual')` |
 
@@ -158,21 +159,22 @@ Socket 事件：`monitor:connected`、`scan:started`、`scan:completed`、`scan:
 
 ### 6.2 `sources.ts` — 适配器
 
-统一出口类型是 `RawStory`（title / url / sourceName / sourceType / publishedAt / content）。
+统一出口类型是 `RawStory`（title / url / sourceName / sourceType / publishedAt / content / sourceQuality）。
 
 当前实现：
 
-- RSS：Hugging Face Blog、OpenAI News、Google AI Blog。用正则从 XML 抽 `<item>` / `<entry>`，不是完整 XML 解析器。
-- Twitter：无 Key 则返回 `[]`；有 Key 则按关键词查 `twitterapi.io`。
-- 网页搜索：需求文档写了，**代码里还没有对应适配器**。
+- RSS：Hugging Face、OpenAI、Google AI、AWS Machine Learning、Microsoft Research、GitHub、TechCrunch AI 与 VentureBeat AI。每源最多取 8 条，用正则从 XML 抽 `<item>` / `<entry>`，不是完整 XML 解析器。
+- 网页/新闻：配置 `FIRECRAWL_API_KEY` 后按关键词经 Firecrawl 发现；只保留 `source-policy.ts` 中的一线或可信域名。
+- X/Twitter：无 Key 则返回 `[]`；有 Key 后按关键词查 `twitterapi.io`，但只接受可信账号，或同时满足认证、粉丝和互动门槛的账号。每个关键词默认最多保留 3 条。
+- 入库前：`story-selection.ts` 进一步要求技术相关、关键词聚焦、相关性和可信度达标，并将 X 默认限制在主情报流的 35% 以内。
 
 `Promise.allSettled` 保证「一个 feed 挂了，其他来源照样入库」。这是多来源系统的标准写法。
 
 ### 6.3 `ai.ts` — 判定
 
-有 `DEEPSEEK_API_KEY` 时调用 `https://api.deepseek.com/chat/completions`，`response_format: json_object`，正文截断到 6000 字。返回必须过 `verdictSchema`（Zod）：`relevant`、`technical`、`contentType`、分数、分类、摘要、关键事实、理由。
+有 `DEEPSEEK_API_KEY` 时调用 `https://api.deepseek.com/chat/completions`，`response_format: json_object`，正文截断到 6000 字。返回必须过 `verdictSchema`（Zod）：`relevant`、`technical`、`contentType`、相关性、关键词聚焦度、可信度、分类、摘要、关键事实、理由。仅“关键词是核心技术事件”才允许 `relevant=true`。
 
-没有 Key 时走本地正则 `technicalSignals`：像技术内容则 `relevant=true` 但 **`credibilityScore` 固定为 0**，因此默认通知阈值 70 下不会发邮件。
+没有 Key 时走本地正则 `technicalSignals`：仅当关键词直接出现在技术内容中才保留，并继承来源质量作为可信度；仍会经过入库前质量/配额筛选。
 
 ### 6.4 `schedule.ts` — 对齐时钟
 
@@ -201,8 +203,8 @@ Socket 事件：`monitor:connected`、`scan:started`、`scan:completed`、`scan:
 
 - `VITE_API_URL` 默认 `http://localhost:8787`。
 - 挂载时拉 keywords / stories / health，并连接 Socket.IO。
-- 情报流每页 5 条。侧栏可增删启停关键词。
-- API 已返回 `credibilityScore`、`classification`、`readAt`，当前卡片主要展示来源、关键词、标题和摘要；标记已读接口也还没接到 UI。
+- 情报流每页 6 条，可按来源筛选和搜索；侧栏可增删启停关键词。
+- 卡片展示来源、关键词、相关性、可信度和已读状态；已读接口已接入 UI。
 
 视觉约定见方案文档：夜间情报台、酸橙黄表示新情报。CSS 集中在 `client/src/App.css`。
 
@@ -210,13 +212,14 @@ Socket 事件：`monitor:connected`、`scan:started`、`scan:completed`、`scan:
 
 ## 7. 配置与安全
 
-复制 `.env.example` 为 `.env`。最低可运行只需端口和数据库路径；DeepSeek、Twitter、SMTP 都是增强项。
+复制 `.env.example` 为 `.env`。最低可运行只需端口和数据库路径；DeepSeek、Firecrawl、Twitter、SMTP 都是增强项。
 
 必须遵守：
 
 - Key 只出现在服务端 `.env`，前端只有 `VITE_API_URL`。
 - CORS / Socket origin 用 `CLIENT_ORIGIN`，默认 `http://localhost:5173`。
 - 采集 `fetch` 带 10s 超时；AI 30s 超时。
+- `FIRECRAWL_API_KEY` 只启用可信网页/新闻发现；`TWITTER_TRUSTED_ACCOUNTS`、`TWITTER_MIN_FOLLOWERS`、`TWITTER_MIN_ENGAGEMENT`、`TWITTER_MAX_SHARE` 和三个 `MIN_*_SCORE` 用于调整内容质量门槛。
 
 ---
 
@@ -226,10 +229,8 @@ Socket 事件：`monitor:connected`、`scan:started`、`scan:completed`、`scan:
 
 | 文档说法 | 当前代码 |
 |---|---|
-| 网页搜索适配器 `web-search` | `sources.ts` 未实现；health 仍报 `web: READY` |
 | `SCAN_INTERVAL_MINUTES` 可配 | 调度写死 30 分钟 |
 | 热点按时间累积查看 | 每次扫描删除全部 stories / matches |
-| 页面展示可信度、理由、未读数、标记已读 | API 有字段；UI 尚未完整展示 |
 | `app_settings` 存邮件与扫描状态 | 表存在，无读写 |
 | `story_matches.notified_at` | 字段存在，通知函数未回写 |
 
@@ -243,11 +244,11 @@ Socket 事件：`monitor:connected`、`scan:started`、`scan:completed`、`scan:
 
 1. **跑通闭环**：加一个关键词，点扫描，看 `scan_runs` 与页面列表是否一致（可用任意 SQLite 客户端打开 `data/hot-monitor.db`）。
 2. **关掉 DeepSeek Key** 再扫一次：确认技术向内容仍可能出现，但不会发邮件（可信度为 0）。
-3. **只配 RSS、不配 Twitter**：确认 Twitter 状态为 `CONFIG`，扫描仍能完成。
+3. **只配 RSS、不配 Twitter**：确认 Twitter 状态为 `CONFIG`，扫描仍能完成；配置 Firecrawl 后确认网页状态变为 `READY`。
 4. **给 `evaluateStory` 写一个单测**：伪造非法 JSON，断言 Zod 抛错，且 `runScan` 不会把该条写成高可信匹配。
 5. **把间隔改成读环境变量**：让 `.env` 的 `SCAN_INTERVAL_MINUTES` 真正生效，并改 health 与测试。
 6. **增量扫描**：去掉每次 DELETE，改为按 URL / hash 跳过已存在内容，并给 UI 一个「不清空」的扫描按钮。
-7. **补网页来源或可信度展示**：二选一即可，前者补适配器，后者把 `classification` / `credibilityScore` / `reasoning` 画到卡片上。
+7. **调整来源策略**：将一个账号加入 `TWITTER_TRUSTED_ACCOUNTS`，或调整 `TWITTER_MAX_SHARE`，然后观察主情报流中的来源分布。
 
 ---
 
