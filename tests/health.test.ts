@@ -36,7 +36,8 @@ describe('health API', () => {
       storyId = Number(db.prepare('INSERT INTO stories (url, title, source_name, source_type, published_at, content, content_hash, discovered_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`https://example.test/${suffix}`, 'Test story', 'Test source', 'web', null, 'Test content', suffix, timestamp, timestamp).lastInsertRowid)
       const matchId = Number(db.prepare('INSERT INTO story_matches (story_id, keyword_id, relevance_score, credibility_score, classification, summary, key_facts_json, reasoning, evaluated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(storyId, keywordId, 90, 90, 'verified', 'Test summary', '[]', 'Test reasoning', timestamp).lastInsertRowid)
 
-      expect((await request(app).get('/api/stories')).body.some((story: { id: number }) => story.id === matchId)).toBe(true)
+      const visibleStory = (await request(app).get('/api/stories')).body.find((story: { id: number }) => story.id === matchId) as { discoveredAt?: string } | undefined
+      expect(visibleStory?.discoveredAt).toBe(timestamp)
       expect((await request(app).patch(`/api/keywords/${keywordId}`).send({ enabled: false })).status).toBe(200)
       expect((await request(app).get('/api/stories')).body.some((story: { id: number }) => story.id === matchId)).toBe(false)
     } finally {

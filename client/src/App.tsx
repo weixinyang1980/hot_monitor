@@ -13,6 +13,7 @@ import {
   LoaderCircle,
   Plus,
   RefreshCw,
+  RotateCcw,
   Rss,
   Search,
   Sparkles,
@@ -27,11 +28,12 @@ import './App.css'
 type Keyword = { id: number; phrase: string; scope: string; enabled: number }
 type Story = {
   id: number; title: string; url: string; sourceName: string; sourceType: string
-  summary: string; publishedAt: string | null; credibilityScore: number; relevanceScore: number
+  summary: string; publishedAt: string | null; discoveredAt: string | null; credibilityScore: number; relevanceScore: number
   classification: string; keywordPhrase: string; readAt: string | null
 }
 type Health = { nextScheduledAt: string; sources: { web: string; rss: string; twitter: string } }
 type SourceFilter = 'all' | 'web' | 'rss' | 'twitter'
+type SortMode = 'latest' | 'relevance'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8787'
 const SOURCE_FILTERS: Array<{ id: SourceFilter; label: string }> = [
@@ -48,15 +50,26 @@ async function requestJson<T>(path: string, options?: RequestInit) {
 }
 
 function formatRelativeTime(value: string | null) {
-  if (!value) return '刚刚发现'
+  if (!value) return null
   const timestamp = new Date(value).getTime()
-  if (Number.isNaN(timestamp)) return '刚刚发现'
+  if (Number.isNaN(timestamp)) return null
   const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000))
   if (minutes < 1) return '刚刚'
   if (minutes < 60) return `${minutes} 分钟前`
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours} 小时前`
   return `${Math.floor(hours / 24)} 天前`
+}
+
+function formatStoryTime(story: Story) {
+  const publishedTime = formatRelativeTime(story.publishedAt)
+  return publishedTime ?? '时间未知'
+}
+
+function publishedTimestamp(value: string | null) {
+  if (!value) return null
+  const timestamp = new Date(value).getTime()
+  return Number.isNaN(timestamp) ? null : timestamp
 }
 
 function subscribeToReducedMotion(onStoreChange: () => void) {
@@ -90,6 +103,8 @@ function App() {
   const [sourceStatus, setSourceStatus] = useState<Health['sources']>({ web: 'READY', rss: 'READY', twitter: 'CONFIG' })
   const [page, setPage] = useState(1)
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
+  const [keywordFilterId, setKeywordFilterId] = useState<number | null>(null)
+  const [sortMode, setSortMode] = useState<SortMode>('latest')
   const [searchQuery, setSearchQuery] = useState('')
   const [error, setError] = useState('')
   const prefersReducedMotion = useReducedMotionPreference()
@@ -103,6 +118,11 @@ function App() {
     ])
     setKeywords(nextKeywords)
     setStories(nextStories)
+    setKeywordFilterId((currentKeywordId) => (
+      currentKeywordId !== null && !nextKeywords.some((keyword) => keyword.id === currentKeywordId && keyword.enabled)
+        ? null
+        : currentKeywordId
+    ))
     setNextScheduledAt(health.nextScheduledAt)
     setSourceStatus(health.sources)
     setError('')
@@ -206,20 +226,41 @@ function App() {
     }
   }
 
+  function resetFeedControls() {
+    setSearchQuery('')
+    setSourceFilter('all')
+    setKeywordFilterId(null)
+    setSortMode('latest')
+    setPage(1)
+  }
+
   const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase()
+  const enabledKeywords = keywords.filter((keyword) => Boolean(keyword.enabled))
+  const selectedKeywordPhrase = enabledKeywords.find((keyword) => keyword.id === keywordFilterId)?.phrase
   const filteredStories = stories.filter((story) => {
     const matchesSource = sourceFilter === 'all' || story.sourceType === sourceFilter
+    const matchesKeyword = !selectedKeywordPhrase || story.keywordPhrase === selectedKeywordPhrase
     const searchableText = `${story.title} ${story.summary} ${story.sourceName} ${story.keywordPhrase}`.toLocaleLowerCase()
-    return matchesSource && (!normalizedSearchQuery || searchableText.includes(normalizedSearchQuery))
+    return matchesSource && matchesKeyword && (!normalizedSearchQuery || searchableText.includes(normalizedSearchQuery))
   })
-  const pageCount = Math.max(1, Math.ceil(filteredStories.length / pageSize))
+  const sortedStories = [...filteredStories].sort((left, right) => {
+    if (sortMode === 'relevance') return right.relevanceScore - left.relevanceScore
+    const leftTimestamp = publishedTimestamp(left.publishedAt)
+    const rightTimestamp = publishedTimestamp(right.publishedAt)
+    if (leftTimestamp === null && rightTimestamp === null) return 0
+    if (leftTimestamp === null) return 1
+    if (rightTimestamp === null) return -1
+    return rightTimestamp - leftTimestamp
+  })
+  const pageCount = Math.max(1, Math.ceil(sortedStories.length / pageSize))
   const activePage = Math.min(page, pageCount)
-  const visibleStories = filteredStories.slice((activePage - 1) * pageSize, activePage * pageSize)
+  const visibleStories = sortedStories.slice((activePage - 1) * pageSize, activePage * pageSize)
   const sortedKeywords = [...keywords].sort((left, right) => Number(right.enabled) - Number(left.enabled))
   const nextScanLabel = nextScheduledAt ? new Date(nextScheduledAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '--:--'
   const today = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())
   const activeKeywordCount = keywords.filter((keyword) => keyword.enabled).length
   const twitterStoryCount = stories.filter((story) => story.sourceType === 'twitter').length
+  const hasActiveFeedControls = Boolean(normalizedSearchQuery) || sourceFilter !== 'all' || keywordFilterId !== null || sortMode !== 'latest'
 
   return (
     <main className="app-shell">
@@ -298,7 +339,7 @@ function App() {
         <section className="feed-panel" aria-labelledby="feed-title">
           <div className="feed-heading">
             <div><div className="eyebrow">SIGNAL STREAM</div><h2 id="feed-title">最新情报</h2></div>
-            <span className="feed-count"><strong>{filteredStories.length.toString().padStart(2, '0')}</strong> 条</span>
+            <span className="feed-count"><strong>{sortedStories.length.toString().padStart(2, '0')}</strong> 条</span>
           </div>
           <div className="feed-tools">
             <div className="search-field">
@@ -310,6 +351,23 @@ function App() {
             <div className="filter-row" aria-label="按来源筛选">
               {SOURCE_FILTERS.map((filter) => <button className={sourceFilter === filter.id ? 'is-selected' : ''} key={filter.id} type="button" aria-pressed={sourceFilter === filter.id} onClick={() => { setSourceFilter(filter.id); setPage(1) }}>{filter.label}</button>)}
             </div>
+            <div className="feed-selects">
+              <label className="select-control" htmlFor="keyword-filter">
+                <span>监控词</span>
+                <select id="keyword-filter" value={keywordFilterId ?? ''} onChange={(event) => { setKeywordFilterId(event.target.value ? Number(event.target.value) : null); setPage(1) }}>
+                  <option value="">全部监控词</option>
+                  {enabledKeywords.map((keyword) => <option key={keyword.id} value={keyword.id}>{keyword.phrase}</option>)}
+                </select>
+              </label>
+              <label className="select-control" htmlFor="story-sort">
+                <span>排序</span>
+                <select id="story-sort" value={sortMode} onChange={(event) => { setSortMode(event.target.value as SortMode); setPage(1) }}>
+                  <option value="latest">最新</option>
+                  <option value="relevance">最相关</option>
+                </select>
+              </label>
+              {hasActiveFeedControls && <button className="feed-reset" type="button" aria-label="重置情报筛选与排序" title="重置筛选与排序" onClick={resetFeedControls}><RotateCcw aria-hidden="true" size={17} /></button>}
+            </div>
           </div>
           <div className="metric-strip" aria-label="当前情报概览">
             <div><span>已捕捉</span><strong>{stories.length}</strong></div>
@@ -319,12 +377,12 @@ function App() {
           {loading ? <div className="loading-state" role="status"><LoaderCircle className="is-spinning" aria-hidden="true" size={24} />正在编排情报流</div> : visibleStories.length ? <><div className="story-list">{visibleStories.map((story) => <article className={`story-card ${story.readAt ? 'is-read' : 'is-unread'}`} key={story.id}>
             <div className="story-card-top">
               <div className="story-source"><span className="source-icon"><SourceGlyph sourceType={story.sourceType} /></span><span>{story.sourceName}</span></div>
-              <div className="story-actions"><span className="story-time">{formatRelativeTime(story.publishedAt)}</span><a className="icon-action" href={story.url} target="_blank" rel="noreferrer" aria-label={`打开原文：${story.title}`} title="打开原文"><ArrowUpRight aria-hidden="true" size={17} /></a>{story.readAt ? <span className="read-status"><Check aria-hidden="true" size={15} />已读</span> : <button className="icon-action" type="button" aria-label={`标记已读：${story.title}`} title="标记已读" onClick={() => markStoryAsRead(story.id)}><Eye aria-hidden="true" size={17} /></button>}</div>
+              <div className="story-actions"><span className="story-time">{formatStoryTime(story)}</span><a className="icon-action" href={story.url} target="_blank" rel="noreferrer" aria-label={`打开原文：${story.title}`} title="打开原文"><ArrowUpRight aria-hidden="true" size={17} /></a>{story.readAt ? <span className="read-status"><Check aria-hidden="true" size={15} />已读</span> : <button className="icon-action" type="button" aria-label={`标记已读：${story.title}`} title="标记已读" onClick={() => markStoryAsRead(story.id)}><Eye aria-hidden="true" size={17} /></button>}</div>
             </div>
             <h3><a href={story.url} target="_blank" rel="noreferrer">{story.title}</a></h3>
             <p>{story.summary}</p>
             <footer className="story-footer"><span className="keyword-tag"><Sparkles aria-hidden="true" size={13} />{story.keywordPhrase}</span><div className="story-scores"><span>可信 <b>{Math.round(story.credibilityScore)}</b></span><span>相关 <b>{Math.round(story.relevanceScore)}</b></span></div></footer>
-          </article>)}</div><nav className="pagination" aria-label="情报分页"><button type="button" disabled={activePage === 1} onClick={() => setPage((current) => current - 1)}><ChevronLeft aria-hidden="true" size={17} /><span>上一页</span></button><span>第 {activePage} / {pageCount} 页</span><button type="button" disabled={activePage === pageCount} onClick={() => setPage((current) => current + 1)}><span>下一页</span><ChevronRight aria-hidden="true" size={17} /></button></nav></> : <div className="empty-state"><Activity aria-hidden="true" size={28} /><strong>{stories.length ? '没有匹配的情报' : '情报流暂时安静'}</strong><span>{stories.length ? '换个来源或搜索词试试。' : '下一次捕捉正在准备。'}</span></div>}
+          </article>)}</div><nav className="pagination" aria-label="情报分页"><button type="button" disabled={activePage === 1} onClick={() => setPage((current) => current - 1)}><ChevronLeft aria-hidden="true" size={17} /><span>上一页</span></button><span>第 {activePage} / {pageCount} 页</span><button type="button" disabled={activePage === pageCount} onClick={() => setPage((current) => current + 1)}><span>下一页</span><ChevronRight aria-hidden="true" size={17} /></button></nav></> : <div className="empty-state"><Activity aria-hidden="true" size={28} /><strong>{stories.length ? '没有匹配的情报' : '情报流暂时安静'}</strong><span>{stories.length ? '换个来源或搜索词试试。' : '下一次捕捉正在准备。'}</span>{stories.length > 0 && hasActiveFeedControls && <button className="empty-reset" type="button" onClick={resetFeedControls}><RotateCcw aria-hidden="true" size={16} />重置筛选</button>}</div>}
         </section>
       </div>
     </main>

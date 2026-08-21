@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { Firecrawl } from 'firecrawl'
+import { extractPublicationDate } from './publication-date.js'
 import { assessTwitterAuthor, getSourcePolicy, getWebSourceQuality, type SourcePolicy, type TwitterAuthor } from './source-policy.js'
 
 export type RawStory = {
@@ -86,6 +87,12 @@ type FirecrawlSearchItem = {
   date?: string
 }
 
+type ScrapedPage = {
+  rawHtml?: string
+  markdown?: string
+  metadata?: Record<string, unknown>
+}
+
 function numericValue(value: number | string | undefined) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
@@ -117,6 +124,63 @@ function sourceNameFromUrl(url: string) {
   }
 }
 
+function recordValue(value: unknown) {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : undefined
+}
+
+function scrapedPage(value: unknown): ScrapedPage {
+  const response = recordValue(value)
+  const data = recordValue(response?.data)
+  return {
+    rawHtml: stringValue(response?.rawHtml) ?? stringValue(data?.rawHtml),
+    markdown: stringValue(response?.markdown) ?? stringValue(data?.markdown),
+    metadata: recordValue(response?.metadata) ?? recordValue(data?.metadata),
+  }
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMilliseconds: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('Publication date scrape timed out')), timeoutMilliseconds)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
+async function webPublicationDate(client: Firecrawl, url: string, searchDate: string | undefined) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const page = scrapedPage(await withTimeout(client.scrape(url, { formats: ['rawHtml', 'markdown'], maxAge: 3_600_000 }), 10_000))
+      return extractPublicationDate({ searchDate, ...page })
+    } catch {
+      continue
+    }
+  }
+  return extractPublicationDate({ searchDate })
+}
+
+async function mapWithConcurrency<TInput, TResult>(items: TInput[], concurrency: number, callback: (item: TInput) => Promise<TResult>) {
+  const results = new Array<TResult>(items.length)
+  let nextIndex = 0
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = nextIndex++
+      if (index >= items.length) return
+      results[index] = await callback(items[index])
+    }
+  }))
+  return results
+}
+
 async function fetchWeb(query: string, policy: SourcePolicy): Promise<RawStory[]> {
   const key = process.env.FIRECRAWL_API_KEY
   if (!key) return []
@@ -130,7 +194,7 @@ async function fetchWeb(query: string, policy: SourcePolicy): Promise<RawStory[]
     timeout: 10_000,
   })
 
-  return searchItems(payload).flatMap((item) => {
+  const candidates = searchItems(payload).flatMap((item) => {
     const url = item.url?.trim()
     if (!url) return []
     const sourceQuality = getWebSourceQuality(url, policy)
@@ -138,15 +202,24 @@ async function fetchWeb(query: string, policy: SourcePolicy): Promise<RawStory[]
     const title = item.title?.trim() || 'Web signal'
     const content = item.markdown?.trim() || item.description?.trim() || item.snippet?.trim() || title
     return [{
+      item,
       title,
       url,
       sourceName: sourceNameFromUrl(url),
-      sourceType: 'web' as const,
-      publishedAt: item.date ?? null,
       content,
       sourceQuality,
     }]
   }).slice(0, 6)
+
+  return mapWithConcurrency(candidates, 2, async (candidate) => ({
+    title: candidate.title,
+    url: candidate.url,
+    sourceName: candidate.sourceName,
+    sourceType: 'web' as const,
+    publishedAt: await webPublicationDate(client, candidate.url, candidate.item.date),
+    content: candidate.content,
+    sourceQuality: candidate.sourceQuality,
+  }))
 }
 
 async function fetchTwitter(query: string, policy: SourcePolicy): Promise<RawStory[]> {

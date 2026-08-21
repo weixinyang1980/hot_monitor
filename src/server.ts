@@ -82,7 +82,7 @@ app.delete('/api/keywords/:id', (request, response) => {
 app.get('/api/stories', (_request, response) => {
   const rows = db.prepare(`
     SELECT sm.id, s.title, s.url, s.source_name as sourceName, s.source_type as sourceType,
-      s.published_at as publishedAt, sm.summary, sm.relevance_score as relevanceScore,
+      s.published_at as publishedAt, s.discovered_at as discoveredAt, sm.summary, sm.relevance_score as relevanceScore,
       sm.credibility_score as credibilityScore, sm.classification, sm.reasoning,
       wk.phrase as keywordPhrase, sm.read_at as readAt
     FROM story_matches sm
