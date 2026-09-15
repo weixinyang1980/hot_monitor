@@ -56,4 +56,26 @@ describe('story selection', () => {
     expect(selected.filter((candidate) => candidate.story.sourceType === 'twitter')).toHaveLength(2)
     expect(selected).toHaveLength(6)
   })
+
+  it('uses qualified RSS and web near-matches to fill a sparse scan without admitting X fallbacks', () => {
+    const fallbackPolicy = getSourcePolicy({
+      MIN_STORIES_PER_SCAN: '4',
+      TRUSTED_FALLBACK_MIN_RELEVANCE_SCORE: '65',
+      TRUSTED_FALLBACK_MIN_KEYWORD_FOCUS_SCORE: '62',
+      TRUSTED_FALLBACK_MIN_SOURCE_QUALITY: '90',
+    })
+    const nearMatch = verdict({ relevanceScore: 66, keywordFocusScore: 63 })
+    const candidates = [
+      { story: story('strict', 'rss'), keyword: 'CodeX', verdict: verdict() },
+      { story: story('gemini', 'web'), keyword: 'Gemini', verdict: nearMatch },
+      { story: story('grok', 'rss'), keyword: 'Grok', verdict: nearMatch },
+      { story: story('harness', 'web'), keyword: 'Harness', verdict: nearMatch },
+      { story: story('x-near-match', 'twitter'), keyword: 'DeepSeek', verdict: nearMatch },
+    ]
+
+    const selected = selectDiverseStories(candidates, fallbackPolicy)
+    expect(selected).toHaveLength(4)
+    expect(selected.map((candidate) => candidate.keyword)).toEqual(expect.arrayContaining(['CodeX', 'Gemini', 'Grok', 'Harness']))
+    expect(selected.some((candidate) => candidate.story.sourceType === 'twitter')).toBe(false)
+  })
 })

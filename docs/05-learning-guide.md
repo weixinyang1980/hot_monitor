@@ -220,6 +220,7 @@ Socket 事件：`monitor:connected`、`scan:started`、`scan:completed`、`scan:
 - CORS / Socket origin 用 `CLIENT_ORIGIN`，默认 `http://localhost:5173`。
 - 采集 `fetch` 带 10s 超时；AI 30s 超时。
 - `FIRECRAWL_API_KEY` 只启用可信网页/新闻发现；`TWITTER_TRUSTED_ACCOUNTS`、`TWITTER_MIN_FOLLOWERS`、`TWITTER_MIN_ENGAGEMENT`、`TWITTER_MAX_SHARE` 和三个 `MIN_*_SCORE` 用于调整内容质量门槛。
+- 当严格结果不足 `MIN_STORIES_PER_SCAN`（默认 8）时，仅来源质量达到 `TRUSTED_FALLBACK_MIN_SOURCE_QUALITY`（默认 90）的 RSS/Web 内容可按两项 `TRUSTED_FALLBACK_MIN_*_SCORE` 较温和地补位；X/Twitter 永不走此回退。
 
 ---
 

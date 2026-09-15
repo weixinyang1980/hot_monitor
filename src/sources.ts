@@ -1,6 +1,5 @@
 import crypto from 'node:crypto'
 import { Firecrawl } from 'firecrawl'
-import { extractPublicationDate } from './publication-date.js'
 import { assessTwitterAuthor, getSourcePolicy, getWebSourceQuality, type SourcePolicy, type TwitterAuthor } from './source-policy.js'
 
 export type RawStory = {
@@ -87,12 +86,6 @@ type FirecrawlSearchItem = {
   date?: string
 }
 
-type ScrapedPage = {
-  rawHtml?: string
-  markdown?: string
-  metadata?: Record<string, unknown>
-}
-
 function numericValue(value: number | string | undefined) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
@@ -109,11 +102,12 @@ function twitterAuthor(tweet: TwitterApiTweet): TwitterAuthor {
   }
 }
 
-function searchItems(payload: unknown): FirecrawlSearchItem[] {
+export function searchItems(payload: unknown): FirecrawlSearchItem[] {
   if (!payload || typeof payload !== 'object') return []
   const response = payload as { data?: { web?: FirecrawlSearchItem[]; news?: FirecrawlSearchItem[] }; web?: FirecrawlSearchItem[]; news?: FirecrawlSearchItem[] }
-  if (response.web || response.news) return [...(response.web ?? []), ...(response.news ?? [])]
-  return [...(response.data?.web ?? []), ...(response.data?.news ?? [])]
+  const collections = response.web || response.news ? response : response.data
+  if (!collections) return []
+  return [...(collections.web ?? []), ...(collections.news ?? [])]
 }
 
 function sourceNameFromUrl(url: string) {
@@ -124,77 +118,20 @@ function sourceNameFromUrl(url: string) {
   }
 }
 
-function recordValue(value: unknown) {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined
-}
-
-function stringValue(value: unknown) {
-  return typeof value === 'string' ? value : undefined
-}
-
-function scrapedPage(value: unknown): ScrapedPage {
-  const response = recordValue(value)
-  const data = recordValue(response?.data)
-  return {
-    rawHtml: stringValue(response?.rawHtml) ?? stringValue(data?.rawHtml),
-    markdown: stringValue(response?.markdown) ?? stringValue(data?.markdown),
-    metadata: recordValue(response?.metadata) ?? recordValue(data?.metadata),
-  }
-}
-
-async function withTimeout<T>(operation: Promise<T>, timeoutMilliseconds: number): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      operation,
-      new Promise<T>((_resolve, reject) => {
-        timeout = setTimeout(() => reject(new Error('Publication date scrape timed out')), timeoutMilliseconds)
-      }),
-    ])
-  } finally {
-    if (timeout) clearTimeout(timeout)
-  }
-}
-
-async function webPublicationDate(client: Firecrawl, url: string, searchDate: string | undefined) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const page = scrapedPage(await withTimeout(client.scrape(url, { formats: ['rawHtml', 'markdown'], maxAge: 3_600_000 }), 10_000))
-      return extractPublicationDate({ searchDate, ...page })
-    } catch {
-      continue
-    }
-  }
-  return extractPublicationDate({ searchDate })
-}
-
-async function mapWithConcurrency<TInput, TResult>(items: TInput[], concurrency: number, callback: (item: TInput) => Promise<TResult>) {
-  const results = new Array<TResult>(items.length)
-  let nextIndex = 0
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
-      const index = nextIndex++
-      if (index >= items.length) return
-      results[index] = await callback(items[index])
-    }
-  }))
-  return results
-}
-
 async function fetchWeb(query: string, policy: SourcePolicy): Promise<RawStory[]> {
   const key = process.env.FIRECRAWL_API_KEY
   if (!key) return []
   const client = new Firecrawl({ apiKey: key })
   const payload = await client.search(`${query} AI technology release developer research`, {
     sources: ['web', 'news'],
+    includeDomains: [...policy.trustedWebDomains],
     limit: 8,
     tbs: 'qdr:w',
-    includeDomains: [...policy.trustedWebDomains],
     ignoreInvalidURLs: true,
     timeout: 10_000,
   })
 
-  const candidates = searchItems(payload).flatMap((item) => {
+  return searchItems(payload).flatMap((item) => {
     const url = item.url?.trim()
     if (!url) return []
     const sourceQuality = getWebSourceQuality(url, policy)
@@ -202,34 +139,22 @@ async function fetchWeb(query: string, policy: SourcePolicy): Promise<RawStory[]
     const title = item.title?.trim() || 'Web signal'
     const content = item.markdown?.trim() || item.description?.trim() || item.snippet?.trim() || title
     return [{
-      item,
       title,
       url,
       sourceName: sourceNameFromUrl(url),
+      sourceType: 'web' as const,
+      publishedAt: item.date ?? null,
       content,
       sourceQuality,
     }]
   }).slice(0, 6)
-
-  return mapWithConcurrency(candidates, 2, async (candidate) => ({
-    title: candidate.title,
-    url: candidate.url,
-    sourceName: candidate.sourceName,
-    sourceType: 'web' as const,
-    publishedAt: await webPublicationDate(client, candidate.url, candidate.item.date),
-    content: candidate.content,
-    sourceQuality: candidate.sourceQuality,
-  }))
 }
 
 async function fetchTwitter(query: string, policy: SourcePolicy): Promise<RawStory[]> {
   const key = process.env.TWITTERAPI_API_KEY
   if (!key) return []
   const endpoint = process.env.TWITTERAPI_SEARCH_URL ?? 'https://api.twitterapi.io/twitter/tweet/advanced_search'
-  const searchUrl = new URL(endpoint)
-  searchUrl.searchParams.set('query', query)
-  searchUrl.searchParams.set('queryType', 'Top')
-  const response = await fetch(searchUrl, { signal: AbortSignal.timeout(10_000), headers: { 'X-API-Key': key, Accept: 'application/json' } })
+  const response = await fetch(`${endpoint}?query=${encodeURIComponent(query)}&queryType=Latest`, { signal: AbortSignal.timeout(10_000), headers: { 'X-API-Key': key, Accept: 'application/json' } })
   if (!response.ok) throw new Error(`twitterapi.io returned ${response.status}`)
   const payload = await response.json() as { tweets?: TwitterApiTweet[] }
   return (payload.tweets ?? []).flatMap((tweet) => {
@@ -250,12 +175,28 @@ async function fetchTwitter(query: string, policy: SourcePolicy): Promise<RawSto
   }).slice(0, policy.maxTwitterResultsPerKeyword)
 }
 
+async function collectSequentially(tasks: Array<() => Promise<RawStory[]>>) {
+  const stories: RawStory[] = []
+  for (const task of tasks) {
+    try {
+      stories.push(...await task())
+    } catch {
+      // Keep other sources available when a provider rejects one request.
+    }
+  }
+  return stories
+}
+
 export async function collectStories(phrases: string[]) {
   const policy = getSourcePolicy()
-  const results = await Promise.allSettled([
-    ...feeds.map(fetchFeed),
-    ...phrases.map((phrase) => fetchWeb(phrase, policy)),
-    ...phrases.map((phrase) => fetchTwitter(phrase, policy)),
+  const [feedResults, webStories, twitterStories] = await Promise.all([
+    Promise.allSettled(feeds.map(fetchFeed)),
+    collectSequentially(phrases.map((phrase) => () => fetchWeb(phrase, policy))),
+    collectSequentially(phrases.map((phrase) => () => fetchTwitter(phrase, policy))),
   ])
-  return results.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+  return [
+    ...feedResults.flatMap((result) => result.status === 'fulfilled' ? result.value : []),
+    ...webStories,
+    ...twitterStories,
+  ]
 }

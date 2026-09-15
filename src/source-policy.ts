@@ -14,6 +14,10 @@ export type SourcePolicy = {
   minRelevanceScore: number
   minKeywordFocusScore: number
   minCredibilityScore: number
+  minTrustedFallbackRelevanceScore: number
+  minTrustedFallbackKeywordFocusScore: number
+  minTrustedFallbackSourceQuality: number
+  minStoriesPerScan: number
   maxTwitterResultsPerKeyword: number
   maxTwitterStories: number
   maxTwitterFallbackStories: number
@@ -105,6 +109,10 @@ export function getSourcePolicy(environment: NodeJS.ProcessEnv = process.env): S
     minRelevanceScore: positiveInteger(environment.MIN_RELEVANCE_SCORE, 72),
     minKeywordFocusScore: positiveInteger(environment.MIN_KEYWORD_FOCUS_SCORE, 78),
     minCredibilityScore: positiveInteger(environment.MIN_CREDIBILITY_SCORE, 62),
+    minTrustedFallbackRelevanceScore: positiveInteger(environment.TRUSTED_FALLBACK_MIN_RELEVANCE_SCORE, 65),
+    minTrustedFallbackKeywordFocusScore: positiveInteger(environment.TRUSTED_FALLBACK_MIN_KEYWORD_FOCUS_SCORE, 62),
+    minTrustedFallbackSourceQuality: positiveInteger(environment.TRUSTED_FALLBACK_MIN_SOURCE_QUALITY, 90),
+    minStoriesPerScan: positiveInteger(environment.MIN_STORIES_PER_SCAN, 8),
     maxTwitterResultsPerKeyword: positiveInteger(environment.TWITTER_MAX_RESULTS_PER_KEYWORD, 3),
     maxTwitterStories: positiveInteger(environment.TWITTER_MAX_STORIES, 6),
     maxTwitterFallbackStories: positiveInteger(environment.TWITTER_MAX_FALLBACK_STORIES, 2),
