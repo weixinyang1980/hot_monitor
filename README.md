@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '135a8cdd-ff54-4c68-9adf-3de6fa909cdc'
-  PropagateID: '135a8cdd-ff54-4c68-9adf-3de6fa909cdc'
-  ReservedCode1: '0b27b7d6-f505-47a3-b8fb-080a74c1e101'
-  ReservedCode2: '0b27b7d6-f505-47a3-b8fb-080a74c1e101'
----
-
 # Hot Monitor
 
 Hot Monitor（AI 情报台）是一个面向中国电信研发团队的 AI 热点监控工具。它围绕用户添加的监控关键词，自动从多个渠道采集 AI 技术动态，经 AI 研判（相关性、技术性、可信度）筛选后，在网页控制台呈现一份"值得看、值得分享"的热点情报流，帮助研发人员更快跟踪值得关注的信息。
@@ -300,5 +289,3 @@ npm --prefix client install
 | `docs/screenshots/15-scan-completed.png` | 扫描完成（10 条新情报） |
 | `docs/screenshots/16-scan-result-page2.png` | 扫描结果第 2 页 |
 | `docs/screenshots/17-mobile-375.png` | 移动端 375px 布局 |
-
-> AI生成
